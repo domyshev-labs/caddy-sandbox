@@ -24,6 +24,69 @@ func fixture(t *testing.T) *service {
 	return s
 }
 
+func TestCommandExecutionModes(t *testing.T) {
+	dir := t.TempDir()
+	executable, output := filepath.Join(dir, "command"), filepath.Join(dir, "arguments")
+	// Capture each argument separately to catch accidental shell evaluation,
+	// especially for paths with spaces, and return a real command failure.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CS_TEST_ARGUMENTS\"\nif [ \"$CS_TEST_FAIL\" = 1 ]; then echo rejected >&2; exit 7; fi\n"
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CS_TEST_ARGUMENTS", output)
+	s := &service{c: config{Caddy: executable, Docker: executable, Container: "caddy", ContainerConfig: "/config with spaces/Caddyfile"}}
+	for _, mode := range []string{"local", "docker"} {
+		s.c.CommandMode = mode
+		for _, reload := range []bool{false, true} {
+			op := "validate"
+			if reload {
+				op = "reload"
+			}
+			if err := s.command(reload); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := op + "\n--config\n/config with spaces/Caddyfile\n--adapter\ncaddyfile\n"
+			if mode == "docker" {
+				want = "exec\ncaddy\ncaddy\n" + want
+			}
+			if string(got) != want {
+				t.Fatalf("%s: got %q, want %q", mode, got, want)
+			}
+		}
+		t.Setenv("CS_TEST_FAIL", "1")
+		if err := s.command(true); err == nil || !strings.Contains(err.Error(), "rejected") {
+			t.Fatalf("%s: lost command error: %v", mode, err)
+		}
+		t.Setenv("CS_TEST_FAIL", "0")
+	}
+}
+
+func TestCommandModeConfiguration(t *testing.T) {
+	t.Setenv("CS_TOKEN", strings.Repeat("x", 32))
+	t.Setenv("CS_COMMAND_MODE", "")
+	c, err := readConfig()
+	if err != nil || c.CommandMode != "docker" {
+		t.Fatalf("default mode: %v, %v", c, err)
+	}
+	t.Setenv("CS_COMMAND_MODE", "local")
+	if _, err := readConfig(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CS_CADDY", "relative/caddy")
+	if _, err := readConfig(); err == nil {
+		t.Fatal("accepted relative executable")
+	}
+	t.Setenv("CS_CADDY", "/usr/bin/caddy")
+	t.Setenv("CS_COMMAND_MODE", "shell")
+	if _, err := readConfig(); err == nil {
+		t.Fatal("accepted unknown mode")
+	}
+}
+
 func request(s *service, method, path, body string, auth bool) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if auth {

@@ -2,6 +2,8 @@
 
 A restricted API for publishing application routes through Caddy. Runs on a Linux VM with Docker/Caddy. No third-party Go dependencies; requires Go 1.22 or later. This is a standalone controller, not a plugin compiled into Caddy.
 
+For a small deployment on one VM, the recommended setup runs the controller inside the existing Caddy container. Go compilation happens during image build; neither Go nor Docker access is needed at runtime. See [Docker deployment](#recommended-deployment-inside-the-caddy-container). Running the controller as a host systemd service remains supported.
+
 The sandbox's Docker port range must already be published. The API does not launch applications or manage sandbox containers. Any external application can use the API; it is not tied to a particular agent or sandbox provider.
 
 ## API contract
@@ -32,9 +34,11 @@ Example response:
 During an update, the API locks operations, checks for external changes, saves the previous file as `sandbox.caddy.pending`, atomically replaces `sandbox.caddy`, and runs:
 
 ```sh
-docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
+
+These commands run directly with `CS_COMMAND_MODE=local`. The default `docker` mode wraps them in `docker exec caddy` for the host installation. `validate` checks locally; `reload` sends the adapted configuration to Caddy's loopback Admin API. Keep that API enabled, without publishing port 2019. See [Caddy reload](https://caddyserver.com/docs/command-line#caddy-reload).
 
 The entire configuration is validated, including other imports. On failure, the previous file is restored, validated, and reloaded. If rollback fails, further updates are blocked, the health check returns 503, and the journal is retained. Restore access to Docker/Caddy and restart the API: it will recover the previous version from the journal. An operation interrupted by a process crash is also rolled back at startup.
 
@@ -58,7 +62,49 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o caddy-sandbox .
 
 For ARM64, use `GOARCH=arm64`. The repository contains source code only; build the binary for your server architecture before installation.
 
-## Installation on the VM
+## Recommended deployment inside the Caddy container
+
+The ready-to-adapt files are in [`examples/docker`](examples/docker). The Dockerfile retains your `xcaddy` build with `github.com/caddy-dns/cloudflare`, builds the controller and a small process supervisor in a separate Go stage, and copies the binaries into `caddy:2`. The Cloudflare module is optional for other deployments. The Go build stage follows the target image architecture; Docker builds the binary rather than requiring Go on the VM.
+
+Both processes share the container's permissions and trust boundary. This setup isolates them from the host without mounting the Docker socket; it does not isolate the controller from Caddy. The supervisor starts Caddy, waits up to 60 seconds for its loopback Admin API, then starts the controller. If either process exits, it stops the other and exits with an error so Docker can restart the container. On normal shutdown it drains the controller before stopping Caddy. `stop_grace_period: 5m` allows configuration updates and rollback to finish. It manages both processes, as required for [multiple processes in a container](https://docs.docker.com/engine/containers/multi-service_container/).
+
+1. Clone or copy this repository to the VM, including its Go sources. From the repository root:
+
+   ```sh
+   cp examples/docker/.env.example examples/docker/.env
+   chmod 600 examples/docker/.env
+   openssl rand -hex 32
+   ```
+
+   Put the generated token in `CS_TOKEN` in `.env`. Set your upstream IP, domain suffix, API URL and port range. Preserve your existing Caddy environment variables, including any Cloudflare token. The example addresses and domains are placeholders.
+
+2. Adapt `examples/docker/Caddyfile` to your existing configuration. Preserve all existing sites, global options and DNS/TLS settings. Merge the example API block, replacing its domain and allowed caller IP. Its upstream is `127.0.0.1:9000` because both processes share the container network. Keep `admin 127.0.0.1:2019` in the global options block; the supplied supervisor expects that exact endpoint. Add the import exactly once:
+
+   ```caddyfile
+   import /etc/caddy/sandbox/sandbox.caddy
+   ```
+
+   Keep the main Caddyfile mounted read-only. Mount the **whole sandbox directory** read-write so atomic replacements, the journal and lock work. Caddy can read that directory too. Never import `sandbox/*`: only import `sandbox.caddy`. For migration, copy the existing route file into `examples/docker/sandbox/sandbox.caddy`; do not replace existing routes with the empty example or copy a lock held by a running controller. Stop the old controller before switching.
+
+3. Merge [`examples/docker/compose.yaml`](examples/docker/compose.yaml) into your existing Compose project. Preserve existing project identity, volume names, other mounts and Caddy settings so `/data` and `/config` continue to use the same named volumes. The provided build context is the repository root (`../..` relative to `examples/docker`); if you relocate the Compose file, adjust `build.context` and `build.dockerfile`. Keep the `CS_COMMAND_MODE=local`, file paths and loopback listen address from the example. Neither 9000 nor 2019 is published. No Docker CLI or socket is needed in this container.
+
+   For a **new installation**, run from the repository root:
+
+   ```sh
+   docker compose -f examples/docker/compose.yaml config --quiet
+   docker compose -f examples/docker/compose.yaml up -d --build
+   docker compose -f examples/docker/compose.yaml logs -f caddy
+   ```
+
+   For an **existing installation**, run `docker compose up -d --build caddy` using your existing, merged Compose file instead. Creating/replacing the container briefly interrupts Caddy; later API route changes use reload without a container restart. Do not use `down -v`, which removes named volumes.
+
+4. Ensure application ports are already published by the sandbox's Docker host and reachable from the Caddy container. Apps must listen on `0.0.0.0:<port>`. Configure DNS for the API and application domains, and allow the intended caller through the API site's `remote_ip` rule. Test `GET /healthz` and a PUT/GET/DELETE cycle using the authenticated curl examples below. Check container logs for successful startup of both processes.
+
+To update, pull the sources and rebuild with your same Compose project and volume mounts. The `.env`, main Caddyfile, persisted routes, certificates and Caddy state remain outside the image. The example preserves your Caddy `2` tags and Cloudflare module selection; pin Caddy images/module versions if you need repeatable dependency builds.
+
+Recovery normally runs automatically when the controller starts. If Caddy itself cannot start because an interrupted update left an invalid imported file, the controller cannot start behind it. Stop the container, preserve both files, restore `sandbox.caddy` from the trusted `sandbox.caddy.pending` journal, and start again. Leave the journal for the controller to validate and complete recovery. Do not delete the sandbox directory to clear an error.
+
+## Alternative: host installation on the VM
 
 The examples use documentation-only addresses: Caddy/API on `192.0.2.10`, and the sandbox and allowed client on `192.0.2.20`. Replace these with your actual addresses and replace the example domains. The allowed client and upstream may have different IP addresses. Set `CS_DOMAIN_SUFFIX` to your application domain and `CS_PUBLIC_URL` to your API URL; update `examples/api.caddy` accordingly. Ensure DNS records for the application domains resolve to Caddy.
 
@@ -158,6 +204,8 @@ The example uses Bash's `read -rs` syntax. Deleting a route does not stop the ap
 | CS_CONTAINER | caddy |
 | CS_CONTAINER_CONFIG | /etc/caddy/Caddyfile |
 | CS_DOCKER | /usr/bin/docker |
+| CS_COMMAND_MODE | docker; use local when running inside the Caddy container |
+| CS_CADDY | /usr/bin/caddy; executable used in local mode |
 
 Run one instance and make all changes to the managed file through the API. Its lock serializes API requests, but not external editors or other Caddy administrators. Make main configuration changes separately from API requests. After a client timeout, use GET to check the result: the request may complete on the server even after the client disconnects.
 

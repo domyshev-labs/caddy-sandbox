@@ -39,6 +39,7 @@ var docsTemplate = template.Must(template.New("docs").Parse(docsHTML))
 
 type config struct {
 	Listen, Token, UpstreamIP, File, Container, ContainerConfig, Docker string
+	CommandMode, Caddy                                                  string
 	DomainSuffix, PublicURL                                             string
 	MinPort, MaxPort                                                    int
 }
@@ -55,6 +56,14 @@ func readConfig() (config, error) {
 		UpstreamIP: env("UPSTREAM_IP", "192.0.2.20"), File: env("FILE", "/opt/caddy/config/sandbox.caddy"),
 		Container: env("CONTAINER", "caddy"), ContainerConfig: env("CONTAINER_CONFIG", "/etc/caddy/Caddyfile"),
 		Docker: env("DOCKER", "/usr/bin/docker")}
+	c.CommandMode = env("COMMAND_MODE", "docker")
+	c.Caddy = env("CADDY", "/usr/bin/caddy")
+	if c.CommandMode != "docker" && c.CommandMode != "local" {
+		return c, errors.New("CS_COMMAND_MODE must be docker or local")
+	}
+	if !filepath.IsAbs(c.Caddy) {
+		return c, errors.New("CS_CADDY must be an absolute executable path")
+	}
 	c.DomainSuffix = env("DOMAIN_SUFFIX", "sandbox.example.com")
 	c.PublicURL = env("PUBLIC_URL", "https://control.example.com")
 	if !validDomain(c.DomainSuffix) {
@@ -204,13 +213,21 @@ func (s *service) command(reload bool) error {
 	if reload {
 		subcommand = "reload"
 	}
-	cmd := exec.CommandContext(ctx, s.c.Docker, "exec", s.c.Container, "caddy", subcommand,
-		"--config", s.c.ContainerConfig, "--adapter", "caddyfile")
+	executable, args := s.commandArgs(subcommand)
+	cmd := exec.CommandContext(ctx, executable, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("caddy %s: %w: %s", subcommand, err, out)
 	}
 	return nil
+}
+
+func (s *service) commandArgs(subcommand string) (string, []string) {
+	args := []string{subcommand, "--config", s.c.ContainerConfig, "--adapter", "caddyfile"}
+	if s.c.CommandMode == "local" {
+		return s.c.Caddy, args
+	}
+	return s.c.Docker, append([]string{"exec", s.c.Container, "caddy"}, args...)
 }
 
 func (s *service) clearJournal() error {

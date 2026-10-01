@@ -1,0 +1,29 @@
+services:
+  caddy:
+    build:
+      context: ../..
+      dockerfile: examples/docker/Dockerfile
+    container_name: caddy
+    restart: unless-stopped
+    stop_grace_period: 5m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    env_file:
+      - .env
+    environment:
+      CS_COMMAND_MODE: local
+      CS_CADDY: /usr/bin/caddy
+      CS_CONTAINER_CONFIG: /etc/caddy/Caddyfile
+      CS_FILE: /etc/caddy/sandbox/sandbox.caddy
+      CS_LISTEN: 127.0.0.1:9000
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sandbox:/etc/caddy/sandbox
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
