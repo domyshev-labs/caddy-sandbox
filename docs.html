@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caddy Sandbox API</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101820;color:#edf2f6;font:16px/1.65 system-ui,sans-serif}main{max-width:960px;margin:auto;padding:56px 24px 80px}.eyebrow{color:#8cddc4;font-size:13px;letter-spacing:.14em;text-transform:uppercase}h1{font-size:clamp(32px,6vw,48px);line-height:1.15;margin:12px 0 18px}h2{font-size:23px;margin-top:40px}.lead{color:#a9b9c6;font-size:18px}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}code{overflow-wrap:anywhere}pre{padding:20px;border:1px solid #344653;border-radius:12px;background:#19242e;overflow-x:auto;line-height:1.7}.table{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:15px}th,td{text-align:left;vertical-align:top;padding:14px 12px;border-bottom:1px solid #344653}th{color:#a9b9c6;font-weight:500}.method{color:#8cddc4;white-space:nowrap}li{margin:8px 0}.note{padding:16px 20px;border-left:3px solid #8cddc4;background:#19242e}footer{color:#a9b9c6;margin-top:48px;font-size:14px}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">Sandbox / publishing control</div>
+<h1>Caddy API</h1>
+<p class="lead">Create, view, and delete application routes under <code>*.{{.DomainSuffix}}</code>.</p>
+<p>Base URL: <code>{{.PublicURL}}</code></p>
+
+<h2>Access</h2>
+<p>API requests require the <code>Authorization: Bearer &lt;token&gt;</code> header. Caddy also restricts access by source IP. This page can be opened without a token.</p>
+<pre>Authorization: Bearer &lt;token&gt;
+Content-Type: application/json</pre>
+
+<h2>Endpoints</h2>
+<div class="table"><table>
+<thead><tr><th>Method</th><th>Path</th><th>Action and response</th></tr></thead>
+<tbody>
+<tr><td class="method">GET</td><td><code>/</code></td><td>This documentation. HTML, 200; no token required.</td></tr>
+<tr><td class="method">PUT</td><td><code>/apps/{name}</code></td><td>Create or update a route. JSON with a <code>port</code> field. Creation returns 201; updates return 200.</td></tr>
+<tr><td class="method">GET</td><td><code>/apps/{name}</code></td><td>Application name, port, and URL. Returns 200; an unknown name returns 404.</td></tr>
+<tr><td class="method">GET</td><td><code>/apps</code></td><td>Array of applications sorted by name. Returns 200; an empty list is <code>[]</code>.</td></tr>
+<tr><td class="method">DELETE</td><td><code>/apps/{name}</code></td><td>Delete a route. Returns 204 with no body; repeated deletion also returns 204.</td></tr>
+<tr><td class="method">GET</td><td><code>/healthz</code></td><td>API status: 200 with <code>{"status":"ok"}</code>, or 503 if configuration recovery is required. Requires a token.</td></tr>
+</tbody></table></div>
+
+<h2>Name and port</h2>
+<ul>
+<li><code>name</code>: 1–63 characters using lowercase ASCII letters, digits, and hyphens. Leading or trailing hyphens, dots, and wildcards are not allowed.</li>
+<li><code>port</code>: an integer from <strong>{{.MinPort}}</strong> to <strong>{{.MaxPort}}</strong>, inclusive. A port assigned to another registered application cannot be used.</li>
+<li>The domain is generated as <code>{name}.{{.DomainSuffix}}</code>. The destination IP is fixed in the API settings: <code>{{.UpstreamIP}}</code>.</li>
+<li>The PUT body contains only <code>port</code>. Arbitrary domains, IP addresses, Caddy directives, and additional fields are not accepted.</li>
+</ul>
+
+<h2>Publish an application</h2>
+<p>Set the <code>TOKEN</code> variable to your token and choose an available port. The API does not launch the application or check its availability before publishing.</p>
+<pre>curl --fail-with-body -X PUT \
+  {{.PublicURL}}/apps/my-app \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"port":{{.MinPort}}}'</pre>
+<p>A successful creation returns <code>201 Created</code>:</p>
+<pre>{
+  "name": "my-app",
+  "port": {{.MinPort}},
+  "url": "https://my-app.{{.DomainSuffix}}"
+}</pre>
+<p>Repeating a PUT with the same name and port returns 200 without another reload. A PUT with a new available port updates the existing route.</p>
+
+<h2>List and delete</h2>
+<pre>curl --fail-with-body {{.PublicURL}}/apps \
+  -H "Authorization: Bearer $TOKEN"
+
+curl --fail-with-body -X DELETE \
+  {{.PublicURL}}/apps/my-app \
+  -H "Authorization: Bearer $TOKEN"</pre>
+<p>Deletion removes the route from Caddy. The application keeps running; stop it before reusing its port.</p>
+
+<h2>Errors</h2>
+<div class="table"><table>
+<thead><tr><th>Status</th><th>Reason</th></tr></thead><tbody>
+<tr><td>400</td><td>Invalid name, port, JSON, or additional fields.</td></tr>
+<tr><td>401</td><td>The token is missing or invalid.</td></tr>
+<tr><td>403</td><td>Caddy rejected the request based on its IP or path; the response may be plain text.</td></tr>
+<tr><td>404</td><td>The application or path was not found.</td></tr>
+<tr><td>405</td><td>The HTTP method is not supported for this path.</td></tr>
+<tr><td>409</td><td>The port is already assigned to another application.</td></tr>
+<tr><td>503</td><td>The configuration update failed or recovery is required. See the server logs for details.</td></tr>
+</tbody></table></div>
+<p>API handler errors use this format:</p>
+<pre>{"error":"port already assigned to another app"}</pre>
+
+<h2>Applying changes</h2>
+<p>The API serializes updates to the separate <code>sandbox.caddy</code> file, validates the entire Caddy configuration, and performs a reload. A successful response confirms that the reload has completed. On failure, the API attempts to restore the previous configuration; an incomplete rollback blocks further changes.</p>
+<p class="note">Docker sandbox ports must be published in advance. Applications inside the sandbox listen on <code>0.0.0.0:&lt;port&gt;</code>. After a client timeout, check the result with GET: the operation may still complete on the server.</p>
+<footer>This documentation is embedded in the binary. The port range and IP address reflect the current server settings.</footer>
+</main></body>
+</html>

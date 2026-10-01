@@ -1,0 +1,10 @@
+/caddy-sandbox
+/caddy-sandbox-linux-*
+/dist/
+*.tar.gz
+*.zip
+*.pending
+*.lock
+.env
+.DS_Store
+coverage.out

@@ -1,0 +1,25 @@
+[Unit]
+Description=Sandbox application routes for Caddy
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caddy-sandbox
+Group=caddy-sandbox
+SupplementaryGroups=docker
+EnvironmentFile=/etc/caddy-sandbox.env
+ExecStart=/usr/local/bin/caddy-sandbox
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=250
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/caddy/config
+
+[Install]
+WantedBy=multi-user.target

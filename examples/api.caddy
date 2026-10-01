@@ -1,0 +1,20 @@
+# Add this block to your main Caddyfile.
+# 192.0.2.20 = allowed caller as seen by Caddy.
+# 192.0.2.10 = VM running the API.
+control.example.com {
+    @allowed {
+        remote_ip 192.0.2.20
+        path / /apps /apps/* /healthz
+    }
+
+    handle @allowed {
+        reverse_proxy 192.0.2.10:9000
+    }
+
+    handle {
+        respond "Forbidden" 403
+    }
+}
+
+# Add once, at the top level of the main Caddyfile:
+import sandbox.caddy
